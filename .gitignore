@@ -1,0 +1,7 @@
+.collab/
+.collab/specs/
+.collab/reports/
+.collab/codex-output.txt
+.collab/test*
+node_modules/
+.DS_Store
