@@ -88,17 +88,11 @@ The slash commands reference TypeScript/Next.js conventions. Edit `.claude/comma
 3. Update the "Project conventions" line in the critical rules section
 4. Add your project's file organization patterns
 
-## Adapting the Codex model
+## Adapting the models
 
-Edit `.claude/bin/codex-bridge.sh` to change the model:
+Run `/collab-init` to choose the model for each stage (`plan`, `build`, `review`, `test`). It lists every model your Codex CLI offers plus the Claude models.
 
-```bash
-# Default (recommended for most tasks)
--m gpt-5.4
+- Put a strong reasoning model on `plan` and `review`, and a faster one on `build` and `test`.
+- `plan` and `review` accept several models at once. They discuss together and the first one listed makes the final call. A panel costs one call per member per round, so keep it for work where a second opinion pays off.
+- `~/.claude/bin/collab-config.sh show` prints the current map; `CODEX_MODEL=<slug>` on a bridge call overrides it once.
 
-# Faster, cheaper for simple tasks
--m gpt-5.4-mini
-
-# Maximum reasoning power
--m o3
-```

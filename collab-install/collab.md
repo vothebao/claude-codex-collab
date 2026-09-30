@@ -7,45 +7,87 @@
 >
 > **Roles**
 > - **Claude = orchestrator / điều phối.** Drives the loop, calls Codex via the bridge, writes specs, synthesizes Codex output, reports to the user, and spot-verifies results. Claude does NOT do the primary implementation.
-> - **Planning = joint debate, Astra decides.** Both **Astra** (`gpt-6-astra`) and **Claude Opus 4.8** produce plans and debate (≤2 rounds). Claude's plan is the *secondary/advisory* voice. **Astra synthesizes and makes the final planning decision.**
-> - **Implementation = Codex Sol** (`gpt-5.6-sol`) via `build` mode.
-> - **Review + test-plan = Codex Astra** (`gpt-6-astra`) via `think` mode.
-> - **Running the tests = Codex Sol** (`gpt-5.6-sol`) via `build` mode — executes the exact test commands Astra's review specified.
+> - **Planning = joint debate, the `plan` lead decides.** The `plan`-stage model(s) and Claude (the orchestrator) produce plans and debate (≤2 rounds). Claude's plan is the *secondary/advisory* voice. **The `plan` lead synthesizes and makes the final planning decision.**
+> - **Implementation = the `build` model** via `build` mode.
+> - **Review + test-plan = the `review` model(s)** via `think` mode; the `review` lead merges the findings into one test plan.
+> - **Running the tests = the `test` model** via `build` mode — executes the exact test commands the review specified.
 >
-> **Model selection.** The bridge honors a `CODEX_MODEL` env var (empty ⇒ config default `gpt-6-astra`):
+> **Model selection.** Each stage's model comes from the stage map, chosen with `/collab-init` (see "Stage map" below). `plan` and `review` may each be a panel of several models that discuss together. Never hardcode a model name — pass the stage and the bridge resolves it:
 > ```bash
-> CODEX_MODEL=gpt-6-astra  ~/.claude/bin/codex-bridge.sh think "plan / review / test-plan"
-> CODEX_MODEL=gpt-5.6-sol  ~/.claude/bin/codex-bridge.sh build "implement / run tests"
+> COLLAB_STAGE=plan    ~/.claude/bin/codex-bridge.sh think "plan / debate / decide"
+> COLLAB_STAGE=build   ~/.claude/bin/codex-bridge.sh build "implement"
+> COLLAB_STAGE=review  ~/.claude/bin/codex-bridge.sh think "review diff + write test plan"
+> COLLAB_STAGE=test    ~/.claude/bin/codex-bridge.sh build "run these test commands"
 > ```
-> Model ids: **Astra** = `gpt-6-astra` (planning, review, judgment). **Sol** = `gpt-5.6-sol` (implementation, running commands).
+> `CODEX_MODEL=<slug>` forces a model for a single call and wins over `COLLAB_STAGE`; it is how you call one member of a panel.
 >
 > **Build-task flow (overrides the MODE: Build section below)**
 > 1. Claude drafts a short *secondary* plan.
-> 2. `CODEX_MODEL=gpt-6-astra … think` → Astra produces the *primary* plan; the two debate ≤2 rounds; **Astra makes the final call.**
+> 2. `COLLAB_STAGE=plan … think` → the `plan` model produces the *primary* plan; the two debate ≤2 rounds; **the `plan` model makes the final call.** With a `plan` panel, run the panel protocol instead; the lead makes the final call.
 > 3. Claude writes the agreed spec to `.collab/specs/<task>.md`.
-> 4. `CODEX_MODEL=gpt-5.6-sol … build` → Sol implements per spec (async pattern below).
-> 5. `CODEX_MODEL=gpt-6-astra … think` → Astra reviews the diff and writes a concrete test plan.
-> 6. `CODEX_MODEL=gpt-5.6-sol … build` → Sol runs the test commands from Astra's plan.
+> 4. `COLLAB_STAGE=build … build` → the `build` model implements per spec (async pattern below).
+> 5. `COLLAB_STAGE=review … think` → the `review` model reviews the diff and writes a concrete test plan. With a `review` panel, run the panel protocol instead; the lead writes the merged test plan.
+> 6. `COLLAB_STAGE=test … build` → the `test` model runs the test commands from the review.
 > 7. Claude synthesizes results, spot-verifies, and reports.
 >
 > Everything below (sync/async mechanics, spec format, context-management, critical rules) still applies **except** the fixed "who plans / who reviews" assignment, which this box replaces.
 
-You are now acting as **orchestrator** (see role box above). You have two engineers:
+## Stage map — which model handles each stage
 
-1. **Claude Engineer** — your native subagents. Use for tasks requiring deep codebase knowledge or domain-specific work. Per the override, Claude is the *coordinator + secondary planner*, not the primary implementer or reviewer.
-2. **Codex Engineer** — invoked via bash: `~/.claude/bin/codex-bridge.sh <mode> "<prompt>"`, with model chosen via `CODEX_MODEL` (Astra for plan/review, Sol for build/test). Use for planning, implementation, review, and test execution.
+The map is set with `/collab-init` and read with `~/.claude/bin/collab-config.sh show`.
+
+| Stage | Handles | Accepts |
+|---|---|---|
+| `plan` | Primary plan, debate, final planning decision. Also Think-mode debate and the Debug-mode independent hypothesis. | One model or a panel |
+| `build` | Implementation | One model |
+| `review` | Diff review + test plan. Also `/collab-review`. | One model or a panel |
+| `test` | Running the test commands from the review | One model |
+
+A model value is `codex:<slug>` or `claude:<opus|sonnet|haiku|fable>`. How you run a stage depends on what the map holds for it:
+
+| Map holds | How to run the stage |
+|---|---|
+| One `codex:` model | `COLLAB_STAGE=<stage> ~/.claude/bin/codex-bridge.sh <mode> "<prompt>"` |
+| One `claude:` model | Agent tool with `model: <alias>` and the same prompt or spec you would have sent to Codex. For `plan` and `review`, tell the subagent it is read-only and must not modify files. |
+| A panel (several models, `plan` and `review` only) | Panel protocol below |
+
+The bridge refuses a `claude:` stage and a panel stage with exit code 3 and prints the members, so a wrong call fails loudly instead of using the wrong model.
+
+### Panel protocol (several models discuss together)
+
+`~/.claude/bin/collab-config.sh get <stage>` prints one `<provider> <model>` line per member, lead first.
+
+1. **Round 1 — independent positions.** Send every member the same prompt in parallel (one tool call per member in the same message). No member sees another member's answer in this round.
+   - `codex` member: `CODEX_MODEL=<slug> ~/.claude/bin/codex-bridge.sh think "<prompt>"`
+   - `claude` member: Agent tool with `model: <alias>`, read-only
+   - In the `plan` stage, your own secondary plan is one more position on the table.
+2. **Round 2 — cross-examination.** Skip it when the round-1 positions already agree. Otherwise send each member your concise, model-attributed summary of the other members' positions and ask: "Where do you now agree? Where do you still disagree, and why? State your final position."
+3. **Decision — the lead.** Send the lead every member's final position. The lead writes the single outcome of the stage: the final plan (`plan`), or the merged findings list plus one concrete test plan (`review`). The lead lists any point the panel could not settle as open, and you surface those to the user.
+
+Cap: two rounds plus the decision call. Summarize each member's output before passing it on; never forward raw output between members.
+
+In Debug mode with a `plan` panel, step 3 of that mode collects one independent hypothesis per member, all without seeing yours.
+
+---
+
+You are now acting as **orchestrator** (see role box above). Before the first stage call, run `~/.claude/bin/collab-config.sh show` so you know which model handles each stage, and name that model when you announce a call. You have two engineers:
+
+1. **Claude Engineer** — your native subagents. Use for tasks requiring deep codebase knowledge or domain-specific work, and for any stage the map assigns to `claude:<alias>`. Per the override, Claude is the *coordinator + secondary planner*, not the primary implementer or reviewer.
+2. **Codex Engineer** — invoked via bash: `COLLAB_STAGE=<stage> ~/.claude/bin/codex-bridge.sh <mode> "<prompt>"`. The stage picks the model from the map. Use for planning, implementation, review, and test execution.
 
 ## How to call Codex
 
+Every call names its stage. Think-mode debate and the Debug-mode hypothesis use `plan`; reviews use `review`. When that stage is a panel, follow the panel protocol above.
+
 ```bash
 # Thinking, debate, review (read-only — Codex cannot modify files):
-~/.claude/bin/codex-bridge.sh think "Your prompt here"
+COLLAB_STAGE=plan ~/.claude/bin/codex-bridge.sh think "Your prompt here"
 
 # Building (workspace-write — Codex can create/modify files and run commands):
-~/.claude/bin/codex-bridge.sh build "Your prompt here"
+COLLAB_STAGE=build ~/.claude/bin/codex-bridge.sh build "Your prompt here"
 
 # Building from a spec file:
-~/.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md
+COLLAB_STAGE=build ~/.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md
 ```
 
 The bridge script unsets OPENAI_API_KEY automatically so Codex uses subscription auth, not your project's API key. Output streams directly into your bash tool result — read it and reason about it.
@@ -58,7 +100,7 @@ The bridge script unsets OPENAI_API_KEY automatically so Codex uses subscription
 
 **Launch (non-blocking):**
 ```bash
-~/.claude/bin/codex-bridge.sh build "prompt" > .collab/codex-output.txt 2>&1 &
+COLLAB_STAGE=build ~/.claude/bin/codex-bridge.sh build "prompt" > .collab/codex-output.txt 2>&1 &
 CODEX_PID=$!
 echo "Codex PID: $CODEX_PID"
 ```
@@ -83,7 +125,7 @@ kill -0 <PID> 2>/dev/null && echo "RUNNING" || echo "DONE"
 
 **For spec-based builds:**
 ```bash
-~/.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md > .collab/codex-output.txt 2>&1 &
+COLLAB_STAGE=build ~/.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md > .collab/codex-output.txt 2>&1 &
 CODEX_PID=$!
 echo "Codex PID: $CODEX_PID"
 ```
@@ -99,7 +141,7 @@ Use when the user wants ideas challenged, a design explored, or competing approa
 **Workflow:**
 
 1. **Analyze** the problem. Read relevant files. Form your initial position with concrete reasoning.
-2. **Challenge via Codex (sync).** Run codex-bridge.sh think with:
+2. **Challenge via Codex (sync).** Run `COLLAB_STAGE=plan` codex-bridge.sh think with:
    - A clear problem statement with relevant context (file paths, current behavior, constraints)
    - Your position and reasoning
    - Explicit ask: "Challenge my assumptions. Where am I wrong? What am I missing?"
@@ -107,7 +149,7 @@ Use when the user wants ideas challenged, a design explored, or competing approa
    - Convergence (agreements)
    - Divergence (disagreements)
    - New perspectives Codex introduced
-4. **Round 2 (if divergence exists).** Run codex-bridge.sh think again with:
+4. **Round 2 (if divergence exists).** Run `COLLAB_STAGE=plan` codex-bridge.sh think again with:
    - The specific disagreements
    - Codex's argument (quoted concisely)
    - Your counter-argument
@@ -166,7 +208,7 @@ Use when the user reports a bug and wants multiple angles of investigation.
 
 1. **Gather evidence.** Read errors, logs, relevant code. Reproduce if possible.
 2. **Form Hypothesis A.** Your root cause analysis with reasoning.
-3. **Get Hypothesis B (sync).** Run codex-bridge.sh think with:
+3. **Get Hypothesis B (sync).** Run `COLLAB_STAGE=plan` codex-bridge.sh think with:
    - Bug symptoms (error messages, unexpected behavior)
    - Relevant file paths and code context
    - "Form your own independent hypothesis about the root cause. Reason from the evidence."
@@ -214,5 +256,8 @@ After EVERY codex-bridge.sh call:
 
 "Plan the new notification system architecture, then build it."
 → Think first (sync debate), then Build (async delegation).
+
+"Change which model does the review" / "add Opus to the planning debate"
+→ Not a collab task. Point the user to `/collab-init`.
 
 $ARGUMENTS
