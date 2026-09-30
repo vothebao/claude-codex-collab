@@ -8,7 +8,7 @@ Get a fast review from Codex on current changes without full collaboration.
 2. **Summarize the changes.** Write a 2-3 sentence summary of what changed and why.
 3. **Call Codex (synchronous — reviews are fast):**
    ```bash
-   .claude/bin/codex-bridge.sh think "Review these recent changes. Focus on: bugs, edge cases, type safety, missing error handling. Be concise — bullet points, critical issues first, skip praise.
+   COLLAB_STAGE=review ~/.claude/bin/codex-bridge.sh think "Review these recent changes. Focus on: bugs, edge cases, type safety, missing error handling. Be concise — bullet points, critical issues first, skip praise.
 
    Files changed: [list paths]
    Summary: [your 2-3 sentence summary]
@@ -19,6 +19,8 @@ Get a fast review from Codex on current changes without full collaboration.
    - Suggestions worth considering
    - Things Codex flagged that you disagree with (and why)
    - Your own observations not covered by Codex
+
+If the bridge exits with code 3, the `review` stage is a Claude model or a panel of several models. Run it the way the "Stage map" section of `/collab` (`~/.claude/commands/collab.md`) describes: a Claude subagent for a `claude:` model, the panel protocol for a panel.
 
 ## Rules
 

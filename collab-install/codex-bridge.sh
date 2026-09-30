@@ -5,6 +5,7 @@
 #   codex-bridge.sh think "Your prompt here"
 #   codex-bridge.sh build "Your prompt here"
 #   codex-bridge.sh build "Implement this spec" .collab/specs/task.md
+#   COLLAB_STAGE=review codex-bridge.sh think "Review the diff"
 #
 # Modes:
 #   think — Read-only. Codex reads files but changes nothing.
@@ -51,13 +52,34 @@ export OTEL_SDK_DISABLED=true
 BYPASS="--dangerously-bypass-approvals-and-sandbox"
 
 # ── Model selection ───────────────────────────────────────
-# Optional CODEX_MODEL env var picks the model per-call. If unset,
-# Codex uses the config.toml default (gpt-6-astra). Backward compatible.
-#   Astra (plan/review): CODEX_MODEL=gpt-6-astra
-#   Sol   (build/test):  CODEX_MODEL=gpt-5.6-sol
+# Precedence, highest first:
+#   1. CODEX_MODEL=<slug>                      — force a model for this call
+#   2. COLLAB_STAGE=<plan|build|review|test>   — model from the stage map
+#      written by /collab-init (see collab-config.sh)
+#   3. neither set                             — Codex config.toml default
+# A stage mapped to claude:<alias> is not a Codex job; the bridge refuses
+# it (exit 3) so the orchestrator runs that stage as a Claude subagent.
+# A stage mapped to a panel of several models is refused the same way; the
+# orchestrator calls each member itself (CODEX_MODEL=<slug> per codex member).
 MODEL_ARGS=()
 if [[ -n "${CODEX_MODEL:-}" ]]; then
   MODEL_ARGS=(-m "$CODEX_MODEL")
+elif [[ -n "${COLLAB_STAGE:-}" ]]; then
+  RESOLVED="$(bash "$(dirname "$0")/collab-config.sh" get "$COLLAB_STAGE")"
+  if [[ "$RESOLVED" == *$'\n'* ]]; then
+    echo "Error: stage '$COLLAB_STAGE' is a panel of several models (lead first):" >&2
+    sed 's/^/  /' <<<"$RESOLVED" >&2
+    echo "Call each member separately: CODEX_MODEL=<slug> for codex members, a Claude subagent for claude members." >&2
+    exit 3
+  fi
+  STAGE_PROVIDER="${RESOLVED%% *}"
+  STAGE_MODEL="${RESOLVED#* }"
+  if [[ "$STAGE_PROVIDER" != "codex" ]]; then
+    echo "Error: stage '$COLLAB_STAGE' is assigned to $STAGE_PROVIDER:$STAGE_MODEL, not Codex." >&2
+    echo "Run this stage as a Claude subagent (model: $STAGE_MODEL) instead of the bridge." >&2
+    exit 3
+  fi
+  MODEL_ARGS=(-m "$STAGE_MODEL")
 fi
 
 # ── Execute ───────────────────────────────────────────────
